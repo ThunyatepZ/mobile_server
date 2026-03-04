@@ -1,0 +1,45 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual Environment
+venv/
+.env/
+.venv/
+
+# Environment Variables
+.env
+.env.*
+
+# VSCode
+.vscode/
+
+# PyCharm
+.idea/
+
+# MacOS
+.DS_Store
+
+# Logs
+*.log
+
+# SQLite DB
+*.sqlite3
+*.db
+
+# Test / Coverage
+.coverage
+htmlcov/
+.pytest_cache/
+
+# Migrations (ถ้าใช้ Alembic แล้วไม่อยาก push version file)
+# alembic/versions/
+
+# Build
+build/
+dist/
+*.egg-info/
+
+# Uvicorn/Gunicorn
+*.pid
