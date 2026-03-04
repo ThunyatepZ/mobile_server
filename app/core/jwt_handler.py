@@ -8,7 +8,7 @@ ALGORITHM = "HS256"
 TOKEN_TIME = 60
 
 class TokenData(BaseModel):
-    username: str
+    email: str
 
 def create_access_token(data: TokenData):
     to_encode = data.dict()
