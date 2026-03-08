@@ -28,7 +28,7 @@ os.makedirs(UPLOAD_DIR, exist_ok=True)
 
 @router.post("/generate")
 async def generate_quiz(
-    file: UploadFile = File(...), 
+    files: List[UploadFile] = File(...), 
     token: str = Depends(oauth2_scheme), 
     conn=Depends(get_db)
 ):
@@ -37,32 +37,37 @@ async def generate_quiz(
     except Exception:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
 
-    # Get user id
+    # Get user id (using normal SQL query)
     cursor = conn.cursor()
     cursor.execute("SELECT id FROM users WHERE email = %s;", (token_data.email,))
     user_row = cursor.fetchone()
     if not user_row:
+        cursor.close()
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
     user_id = user_row[0]
     cursor.close()
 
-    # Save uploaded file
-    file_id = str(uuid.uuid4())
-    file_path = os.path.join(UPLOAD_DIR, f"{file_id}_{file.filename}")
-    with open(file_path, "wb") as buffer:
-        shutil.copyfileobj(file.file, buffer)
+    all_text = ""
+    saved_file_paths = []
 
     try:
-        # Extract and Generate
-        text = ""
-        if file.filename.endswith(".pdf"):
-            text = extract_text_from_pdf(file_path)
-        else:
-            with open(file_path, "r") as f:
-                text = f.read()
+        # Save uploaded files and extract text
+        for file in files:
+            file_id = str(uuid.uuid4())
+            file_path = os.path.join(UPLOAD_DIR, f"{file_id}_{file.filename}")
+            saved_file_paths.append(file_path)
+            
+            with open(file_path, "wb") as buffer:
+                shutil.copyfileobj(file.file, buffer)
+            
+            if file.filename.endswith(".pdf"):
+                all_text += extract_text_from_pdf(file_path) + "\n"
+            else:
+                with open(file_path, "r", encoding="utf-8") as f:
+                    all_text += f.read() + "\n"
         
         # Generate Quiz with AI
-        quiz_json = generate_quiz_from_text(text)
+        quiz_json = generate_quiz_from_text(all_text)
         
         # Save to DB
         quiz_id = save_quiz_to_db(conn, user_id, quiz_json)
@@ -71,8 +76,12 @@ async def generate_quiz(
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
     finally:
-        if os.path.exists(file_path):
-            os.remove(file_path)
+        for path in saved_file_paths:
+            if os.path.exists(path):
+                try:
+                    os.remove(path)
+                except Exception:
+                    pass
 
 @router.get("/")
 def get_all_quizzes(conn=Depends(get_db)):
