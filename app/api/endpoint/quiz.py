@@ -6,25 +6,42 @@ import os
 import uuid
 
 from app.db.superbase import get_db_connection
-from app.api.endpoint.auth import oauth2_scheme, decoder_token
+from app.api.endpoint.auth import oauth2_scheme
+from app.core.jwt_handler import decoder_token
 from app.service.quiz_service import (
     extract_text_from_pdf, 
     generate_quiz_from_text, 
     save_quiz_to_db
 )
 
+class QuizSubmitRequest(BaseModel):
+    quiz_id: str
+    score: int
+    total_questions: int
+
 router = APIRouter()
 
 def get_db():
-    conn = get_db_connection()
+    connection = get_db_connection()
+    if connection is None:
+        raise HTTPException(status_code=500, detail="Database connection error")
     try:
-        yield conn
+        yield connection
     finally:
-        conn.close()
+        connection.close()
 
 # Temporary upload folder
 UPLOAD_DIR = "temp_uploads"
 os.makedirs(UPLOAD_DIR, exist_ok=True)
+
+def _get_user_id_from_email(connection, email: str):
+    cursor = connection.cursor()
+    try:
+        cursor.execute("SELECT id FROM users WHERE email = %s;", (email,))
+        row = cursor.fetchone()
+        return row[0] if row else None
+    finally:
+        cursor.close()
 
 @router.post("/generate")
 async def generate_quiz(
@@ -37,64 +54,67 @@ async def generate_quiz(
     except Exception:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
 
-    # Get user id (using normal SQL query)
-    cursor = conn.cursor()
-    cursor.execute("SELECT id FROM users WHERE email = %s;", (token_data.email,))
-    user_row = cursor.fetchone()
-    if not user_row:
-        cursor.close()
+    user_id = _get_user_id_from_email(conn, token_data.email)
+    if not user_id:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
-    user_id = user_row[0]
-    cursor.close()
 
-    all_text = ""
-    saved_file_paths = []
+    combined_text = ""
+    temporary_file_paths: List[str] = []
 
     try:
-        # Save uploaded files and extract text
-        for file in files:
+        for upload in files:
             file_id = str(uuid.uuid4())
-            file_path = os.path.join(UPLOAD_DIR, f"{file_id}_{file.filename}")
-            saved_file_paths.append(file_path)
+            temp_path = os.path.join(UPLOAD_DIR, f"{file_id}_{upload.filename}")
+            temporary_file_paths.append(temp_path)
             
-            with open(file_path, "wb") as buffer:
-                shutil.copyfileobj(file.file, buffer)
+            with open(temp_path, "wb") as buffer:
+                shutil.copyfileobj(upload.file, buffer)
             
-            if file.filename.endswith(".pdf"):
-                all_text += extract_text_from_pdf(file_path) + "\n"
+            if upload.filename.endswith(".pdf"):
+                combined_text += extract_text_from_pdf(temp_path) + "\n"
             else:
-                with open(file_path, "r", encoding="utf-8") as f:
-                    all_text += f.read() + "\n"
+                with open(temp_path, "r", encoding="utf-8") as f:
+                    combined_text += f.read() + "\n"
         
-        # Generate Quiz with AI
-        quiz_json = generate_quiz_from_text(all_text)
+        quiz_json = generate_quiz_from_text(combined_text)
         
-        # Save to DB
         quiz_id = save_quiz_to_db(conn, user_id, quiz_json)
         
         return {"status": "success", "quiz_id": str(quiz_id), "title": quiz_json['title']}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
     finally:
-        for path in saved_file_paths:
-            if os.path.exists(path):
+        for temp_path in temporary_file_paths:
+            if os.path.exists(temp_path):
                 try:
-                    os.remove(path)
+                    os.remove(temp_path)
                 except Exception:
                     pass
 
 @router.get("/")
-def get_all_quizzes(conn=Depends(get_db)):
+def get_all_quizzes(token: str = Depends(oauth2_scheme), conn=Depends(get_db)):
+    try:
+        token_data = decoder_token(token)
+    except Exception:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
+
     cursor = conn.cursor()
     try:
+        cursor.execute("SELECT id FROM users WHERE email = %s;", (token_data.email,))
+        user_row = cursor.fetchone()
+        if not user_row:
+            raise HTTPException(status_code=404, detail="User not found")
+        user_id = user_row[0]
+
         cursor.execute(
             """
             SELECT q.id, q.title, q.description, u.username, q.created_at
             FROM quizzes q
             JOIN users u ON q.creator_id = u.id
-            WHERE q.is_public = true
+            WHERE q.creator_id = %s
             ORDER BY q.created_at DESC;
-            """
+            """,
+            (user_id,)
         )
         rows = cursor.fetchall()
         quizzes = []
@@ -111,6 +131,46 @@ def get_all_quizzes(conn=Depends(get_db)):
         return {"status": "error", "message": str(e)}
     finally:
         cursor.close()
+
+
+@router.get("/my")
+def get_my_quizzes(token: str = Depends(oauth2_scheme), conn=Depends(get_db)):
+    try:
+        token_data = decoder_token(token)
+    except Exception:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
+
+    cursor = conn.cursor()
+    try:
+        user_id = _get_user_id_from_email(conn, token_data.email)
+        if not user_id:
+            raise HTTPException(status_code=404, detail="User not found")
+
+        cursor.execute(
+            """
+            SELECT id, title, description, created_at, is_public
+            FROM quizzes
+            WHERE creator_id = %s
+            ORDER BY created_at DESC;
+            """,
+            (user_id,)
+        )
+        rows = cursor.fetchall()
+        quizzes = []
+        for row in rows:
+            quizzes.append({
+                "id": str(row[0]),
+                "title": row[1],
+                "description": row[2],
+                "created_at": str(row[3]),
+                "is_public": row[4]
+            })
+        return {"status": "success", "quizzes": quizzes}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+    finally:
+        cursor.close()
+
 
 @router.get("/{quiz_id}")
 def get_quiz_detail(quiz_id: str, conn=Depends(get_db)):
@@ -148,3 +208,34 @@ def get_quiz_detail(quiz_id: str, conn=Depends(get_db)):
         raise HTTPException(status_code=500, detail=str(e))
     finally:
         cursor.close()
+
+@router.post("/submit")
+def submit_quiz_attempt(req: QuizSubmitRequest, token: str = Depends(oauth2_scheme), conn=Depends(get_db)):
+    try:
+        token_data = decoder_token(token)
+    except Exception:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
+
+    cursor = conn.cursor()
+    try:
+        user_id = _get_user_id_from_email(conn, token_data.email)
+        if not user_id:
+            raise HTTPException(status_code=404, detail="User not found")
+
+        cursor.execute(
+            """
+            INSERT INTO attempts (user_id, quiz_id, score, total_questions)
+            VALUES (%s, %s, %s, %s)
+            RETURNING id;
+            """,
+            (user_id, req.quiz_id, req.score, req.total_questions)
+        )
+        attempt_id = cursor.fetchone()[0]
+        conn.commit()
+        return {"status": "success", "attempt_id": str(attempt_id)}
+    except Exception as e:
+        conn.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        cursor.close()
+

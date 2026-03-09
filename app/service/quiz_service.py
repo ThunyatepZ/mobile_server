@@ -69,7 +69,7 @@ def save_quiz_to_db(conn, user_id, quiz_data):
             VALUES (%s, %s, %s, %s)
             RETURNING id;
             """,
-            (user_id, quiz_data['title'], quiz_data['description'], True)
+            (user_id, quiz_data['title'], quiz_data['description'], False)
         )
         quiz_id = cursor.fetchone()[0]
 
