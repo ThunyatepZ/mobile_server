@@ -89,7 +89,7 @@ def auth_register(req: AuthRegisterRequest, conn=Depends(get_db)):
             (req.email, req.username, hashed_password),
         )
 
-        row = cursor.fetchone()
+        row = cursor.fetchone() #row = array
         if not row:
             return {"status": "error", "message": "Email is already registered"}
 
@@ -98,9 +98,9 @@ def auth_register(req: AuthRegisterRequest, conn=Depends(get_db)):
 
         return {"status": "success", "user_id": str(user_id)}
 
-    except Exception as e:
+    except Exception :
         conn.rollback()
-        error_message = str(e)
+        error_message = str(Exception)
         if "no unique or exclusion constraint matching the ON CONFLICT specification" in error_message:
             return {
                 "status": "error",
@@ -178,32 +178,60 @@ def auth_me(token: str = Depends(oauth2_scheme), conn=Depends(get_db)):
         cursor.close()
 
 @router.get("/history")
-def auth_history(token: str = Depends(oauth2_scheme), conn=Depends(get_db)):
+def auth_history(
+    token: str = Depends(oauth2_scheme),  # 1️⃣ ดึง Bearer token จาก Header
+    conn = Depends(get_db)                # 2️⃣ ขอ database connection
+):
+    
+    # 3️⃣ ถอดรหัส JWT token เพื่อเอาข้อมูล user (เช่น email)
     try:
         token_data = decoder_token(token)
     except HTTPException:
+        # ถ้าเป็น HTTPException อยู่แล้ว → โยนต่อไปเลย
         raise
     except Exception:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
+        # ถ้า token ผิด format หรือหมดอายุ
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid token"
+        )
 
+    # 4️⃣ สร้าง cursor เพื่อสั่ง SQL
     cursor = conn.cursor()
+
     try:
+        # 5️⃣ Query ดึงประวัติการทำ quiz ของ user คนนี้
         cursor.execute(
             """
-            SELECT a.id, q.id as quiz_id, q.title as quiz_title, a.score, a.total_questions, a.completed_at
-            FROM users u
-            JOIN attempts a ON u.id = a.user_id
-            JOIN quizzes q ON a.quiz_id = q.id
-            WHERE u.email = %s
-            ORDER BY a.completed_at DESC;
+SELECT 
+    a.id,                 -- attempt id
+    q.id as quiz_id,      -- quiz id
+    q.title as quiz_title,-- ชื่อ quiz
+    a.score,              -- คะแนนที่ได้
+    a.total_questions,    -- จำนวนข้อทั้งหมด
+    a.completed_at        -- เวลาทำเสร็จ
+FROM users u
+JOIN attempts a ON u.id = a.user_id
+JOIN quizzes q ON a.quiz_id = q.id
+WHERE u.email = %s
+ORDER BY a.completed_at DESC;
             """,
-            (token_data.email,)
+            (token_data.email,)  # ใช้ email จาก token
         )
+
+        # 6️⃣ ดึงทุกแถวที่ได้จาก query
         rows = cursor.fetchall()
-        
+
+        # 7️⃣ เตรียม list สำหรับเก็บผลลัพธ์
         history = []
+
+        # 8️⃣ วนลูปแต่ละแถวที่ได้จาก DB
         for attempt_row in rows:
+            
+            # unpack tuple
             attempt_id, quiz_id, quiz_title, score, total, completed_at = attempt_row
+
+            # 9️⃣ แปลงเป็น dict แล้วเพิ่มเข้า list
             history.append(
                 {
                     "attempt_id": str(attempt_id),
@@ -214,9 +242,20 @@ def auth_history(token: str = Depends(oauth2_scheme), conn=Depends(get_db)):
                     "completed_at": str(completed_at),
                 }
             )
-            
-        return {"status": "success", "history": history}
+
+        # 🔟 ส่งข้อมูลกลับไป frontend
+        return {
+            "status": "success",
+            "history": history
+        }
+
     except Exception as e:
-        return {"status": "error", "message": str(e)}
+        # ถ้า query พัง
+        return {
+            "status": "error",
+            "message": str(e)
+        }
+
     finally:
+        # 1️⃣1️⃣ ปิด cursor ไม่ให้ memory leak
         cursor.close()

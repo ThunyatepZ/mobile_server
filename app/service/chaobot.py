@@ -53,14 +53,17 @@ chain = prompt | llm | parser
 store = {}
 
 
-def get_session_memory(session_id: str) -> ConversationBufferWindowMemory:
-    """ฟังก์ชันที่ใช้ดึง Buffer Memory ของผู้ใช้"""
+def get_session_data(session_id: str):
+    """ฟังก์ชันที่ใช้ดึงข้อมูล Session (Memory + VectorDB) ของผู้ใช้"""
     if session_id not in store:
-        store[session_id] = ConversationBufferWindowMemory(
-            k=10,
-            memory_key="chat_history",
-            return_messages=True,
-        )
+        store[session_id] = {
+            "memory": ConversationBufferWindowMemory(
+                k=10,
+                memory_key="chat_history",
+                return_messages=True,
+            ),
+            "vector_store": None
+        }
     return store[session_id]
 
 
@@ -125,27 +128,37 @@ def ask_chatbot(
 ) -> str:
     """
     ฟังก์ชันหลักที่ให้ Endpoint เรียกใช้งาน
-    จะใช้ Context จากเอกสารที่อัปโหลดมาเท่านั้น
+    สามารถจำเอกสารที่เคยอัปโหลดไว้ก่อนหน้าใน Session เดียวกันได้
     """
-    # 1. โหลดประวัติแชท
-    memory = get_session_memory(session_id)
+    # 1. โหลดข้อมูล Session
+    session_data = get_session_data(session_id)
+    memory = session_data["memory"]
     chat_history = memory.load_memory_variables({})["chat_history"]
 
-    # 2. ค้นหาเอกสารอ้างอิงจากไฟล์ที่อัปโหลด
-    context_text = "ไม่พบข้อมูลอ้างอิง เนื่องจากไม่ได้มีการอัปโหลดเอกสาร"
-    
+    # 2. จัดการไฟล์อัปโหลด (ถ้ามีส่งมาใหม่ ให้สร้าง Vector Store ชุดใหม่ทับของเดิม)
     if uploaded_file_bytes and uploaded_filename:
-        context_text = _build_context_from_uploaded_file(
-            question=question,
-            file_bytes=uploaded_file_bytes,
-            filename=uploaded_filename,
-        )
-    else:
-        # หากไม่มีไฟล์แนบในรอบนี้ และระบบไม่ได้เก็บ Index ไว้ (ในที่นี้เราเน้น On-the-fly ตามคำขอ)
-        # เราแจ้งว่าไม่มี Context
-        pass
+        text = _extract_text_from_uploaded_file(uploaded_file_bytes, uploaded_filename)
+        if text:
+            chunks = _chunk_text(text)
+            if chunks:
+                # สร้างและเก็บ Vector Store ไว้ใน Session
+                session_data["vector_store"] = FAISS.from_texts(chunks, embedding=embeddings)
+            else:
+                raise ValueError("ไม่พบเนื้อหาที่แบ่งเป็นส่วนๆ ได้ในไฟล์นี้")
+        else:
+            raise ValueError("ไม่สามารถอ่านข้อความจากไฟล์ที่อัปโหลดได้")
 
-    # 3. สั่งให้ Chain ตอบคำถาม
+    # 3. ค้นหาเอกสารอ้างอิงจาก Vector Store ที่อยู่ใน Session
+    vector_store = session_data.get("vector_store")
+    if vector_store:
+        # ค้นหาข้อมูลที่ใกล้เคียงที่สุด 4 ส่วน
+        docs = vector_store.similarity_search(question, k=4)
+        context_text = "\n\n".join([doc.page_content for doc in docs])
+    else:
+        # กรณีไม่มีเอกสารอัปโหลดเลย ทั้งในรอบนี้และรอบก่อนๆ
+        context_text = "ไม่พบข้อมูลอ้างอิง เนื่องจากไม่ได้มีการอัปโหลดเอกสาร"
+
+    # 4. สั่งให้ Chain ตอบคำถาม
     response = chain.invoke(
         {
             "chat_history": chat_history,
@@ -154,7 +167,7 @@ def ask_chatbot(
         }
     )
 
-    # 4. บันทึกคำถามของ User และคำตอบของ AI ลง Memory
+    # 5. บันทึกคำถามของ User และคำตอบของ AI ลง Memory
     memory.save_context(
         {"input": question},
         {"output": response},
