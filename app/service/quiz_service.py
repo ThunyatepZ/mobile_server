@@ -6,11 +6,14 @@ from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import JsonOutputParser
 from pydantic import BaseModel, Field
 from typing import List
+from dotenv import load_dotenv
+
+load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), '..', '.env'))
 
 # Setup LLM
 llm = ChatOpenAI(
     base_url="https://api.opentyphoon.ai/v1",
-    api_key=os.getenv("sk-fwHhy1y3BM8Euzq8UfHSTfIpyx894uhFzxAydFxq3cffmrCn"),
+    api_key=os.getenv("TYPHOON_KEY"),
     model='typhoon-v2.5-30b-a3b-instruct',
     temperature=0.3,
     max_tokens=8000
@@ -36,12 +39,12 @@ prompt = ChatPromptTemplate.from_messages([
      "1. สร้างคำถามที่วัดความเข้าใจ ไม่ใช่แค่การจำ\n"
      "2. ให้คำอธิบาย (explanation) ที่ชัดเจนสำหรับแต่ละข้อ\n"
      "3. ผลลัพธ์ต้องเป็นรูปแบบ JSON ตามที่กำหนดเท่านั้น\n"
-     "4. ใช้ภาษาไทยในการออกข้อสอบ\n",
-     "5. อ่านข้อมูลจากไฟล์PDFที่ได้รับแล้วสร้างข้อสอบ\n",
-     "6. หากไม่ทราบข้อมูลควรบอกเชิงความหมายว่าไม่สามารถบอกรายละเอียดนั้นได้ เช่น หากไม่รู้ชื่อผู้สอน ควรเขียนว่าไม่ทราบผู้สอน\n",
-     "7. ห้ามพิมพ์ข้อมูลที่ไม่มีในเนื้อหา ยกเว้นข้อมูลที่จำเป็นต่อการออกข้อสอบ\n",
-     "8. ห้ามสร้างคำถามที่ซ้ำกัน\n",
-     "9. ใช้ภาษาไทยอย่างถูกต้องตามหลักภาษาไทย\n",
+     "4. ใช้ภาษาไทยในการออกข้อสอบ\n"
+     "5. อ่านข้อมูลจากไฟล์PDFที่ได้รับแล้วสร้างข้อสอบ\n"
+     "6. หากไม่ทราบข้อมูลควรบอกเชิงความหมายว่าไม่สามารถบอกรายละเอียดนั้นได้ เช่น หากไม่รู้ชื่อผู้สอน ควรเขียนว่าไม่ทราบผู้สอน\n"
+     "7. ห้ามพิมพ์ข้อมูลที่ไม่มีในเนื้อหา ยกเว้นข้อมูลที่จำเป็นต่อการออกข้อสอบ\n"
+     "8. ห้ามสร้างคำถามที่ซ้ำกัน\n"
+     "9. ใช้ภาษาไทยอย่างถูกต้องตามหลักภาษาไทย\n"
      ),
     ("human", "เนื้อหาสำหรับออกข้อสอบ:\n{context}\n\n{format_instructions}")
 ])

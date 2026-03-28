@@ -9,7 +9,7 @@ from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_community.vectorstores import FAISS
 from langchain_openai import ChatOpenAI
-from langchain_text_splitters import RecursiveCharacterTextSplitter
+from langchain_experimental.text_splitter import SemanticChunker
 
 # โหลด Environment Variables
 load_dotenv()
@@ -33,15 +33,15 @@ llm = ChatOpenAI(
 prompt = ChatPromptTemplate.from_messages([
     (
         "system",
-        "คุณคือ 'Learnify Bot' ผู้ช่วยส่วนตัวของผู้ใช้ หน้าที่หลักของคุณคือการอ่านและวิเคราะห์เอกสารที่ผู้ใช้อัปโหลดมาให้\n\n"
+        "คุณคือ 'Learnify Bot' ผู้ช่วยส่วนตัวที่ฉลาดและเป็นมิตร หน้าที่ของคุณคือช่วยผู้ใช้เรียนรู้และทำความเข้าใจเนื้อหาต่างๆ\n\n"
         "ข้อควรปฏิบัติ:\n"
-        "1. ตอบคำถามและให้คำอธิบายโดยอิงจาก 'ข้อมูลอ้างอิง (Context)' ที่มาจากเอกสารที่ผู้ใช้อัปโหลดเท่านั้น\n"
-        "2. หากข้อมูลที่ถามไม่มีในเอกสาร ให้ตอบตามความเป็นจริงว่าไม่พบข้อมูลนั้นในเอกสารที่ให้มา\n"
-        "3. ให้คำแนะนำด้วยน้ำเสียงที่เป็นมิตรและเข้าใจง่าย\n"
-        "4. หากไม่มีข้อมูลอ้างอิง (Context) จากเอกสาร ให้แจ้งผู้ใช้ว่ากรุณาอัปโหลดเอกสารก่อนถามคำถามเกี่ยวกับเนื้อหา",
+        "1. หากผู้ใช้อัปโหลดเอกสารมา (ดูจาก Context) ให้เน้นตอบโดยอิงจากข้อมูลในเอกสารนั้นเป็นหลัก และให้คำอธิบายที่ละเอียดและเข้าใจง่าย\n"
+        "2. หากข้อมูลที่ถามไม่มีในเอกสาร หรือผู้ใช้ยังไม่ได้อัปโหลดเอกสาร คุณสามารถตอบโดยใช้ความรู้ทั่วไปที่คุณมีได้ตามความเหมาะสม แต่ควรแจ้งให้ผู้ทราบหากข้อมูลนั้นไม่ได้มาจากเอกสารที่เขาให้มา\n"
+        "3. ให้คำแนะนำด้วยน้ำเสียงที่เป็นมิตร กระตือรือร้น และส่งเสริมการเรียนรู้\n"
+        "4. หากผู้ใช้ถามถึงเนื้อหาที่ต้องอาศัยข้อมูลเฉพาะเจาะจงแต่ 'ยังไม่มีการอัปโหลดเอกสารเลยในเซสชันนี้' ให้แนะนำอย่างสุภาพว่าเขาสามารถอัปโหลดไฟล์ (PDF/Text) เพื่อให้คุณช่วยวิเคราะห์เนื้อหานั้นได้อย่างแม่นยำยิ่งขึ้น",
     ),
     MessagesPlaceholder(variable_name="chat_history"),
-    ("human", "ข้อมูลอ้างอิง:\n{context}\n\nคำถาม: {question}"),
+    ("human", "ข้อมูลอ้างอิงจากเซสชันปัจจุบัน:\n{context}\n\nคำถาม: {question}"),
 ])
 
 parser = StrOutputParser()
@@ -83,7 +83,6 @@ def _extract_text_from_uploaded_file(file_bytes: bytes, filename: str) -> str:
     if lower_name.endswith((".txt", ".md", ".csv", ".json")):
         return file_bytes.decode("utf-8", errors="ignore").strip()
 
-    # fallback
     decoded = file_bytes.decode("utf-8", errors="ignore").strip()
     if decoded:
         return decoded
@@ -92,15 +91,12 @@ def _extract_text_from_uploaded_file(file_bytes: bytes, filename: str) -> str:
 
 
 def _chunk_text(text: str) -> List[str]:
-    """แบ่ง Chunk ข้อความโดยใช้ RecursiveCharacterTextSplitter เพื่อคุณภาพที่ดีขึ้น"""
     if not text:
         return []
     
-    splitter = RecursiveCharacterTextSplitter(
-        chunk_size=1000,
-        chunk_overlap=200,
-        length_function=len,
-        separators=["\n\n", "\n", " ", ""]
+    splitter = SemanticChunker(
+        embeddings,
+        breakpoint_threshold_type="percentile"
     )
     return splitter.split_text(text)
 
@@ -123,8 +119,7 @@ def _build_context_from_uploaded_file(question: str, file_bytes: bytes, filename
 def ask_chatbot(
     session_id: str,
     question: str,
-    uploaded_file_bytes: Optional[bytes] = None,
-    uploaded_filename: Optional[str] = None,
+    uploaded_files: Optional[List[dict]] = None,
 ) -> str:
     """
     ฟังก์ชันหลักที่ให้ Endpoint เรียกใช้งาน
@@ -135,18 +130,26 @@ def ask_chatbot(
     memory = session_data["memory"]
     chat_history = memory.load_memory_variables({})["chat_history"]
 
-    # 2. จัดการไฟล์อัปโหลด (ถ้ามีส่งมาใหม่ ให้สร้าง Vector Store ชุดใหม่ทับของเดิม)
-    if uploaded_file_bytes and uploaded_filename:
-        text = _extract_text_from_uploaded_file(uploaded_file_bytes, uploaded_filename)
-        if text:
-            chunks = _chunk_text(text)
-            if chunks:
-                # สร้างและเก็บ Vector Store ไว้ใน Session
-                session_data["vector_store"] = FAISS.from_texts(chunks, embedding=embeddings)
+    # 2. จัดการไฟล์อัปโหลด (ถ้ามีส่งมาใหม่ ให้เพิ่มเข้าไปใน Vector Store เดิม)
+    if uploaded_files:
+        all_new_chunks = []
+        for file_data in uploaded_files:
+            file_bytes = file_data.get("bytes")
+            filename = file_data.get("filename")
+            
+            if file_bytes and filename:
+                text = _extract_text_from_uploaded_file(file_bytes, filename)
+                if text:
+                    chunks = _chunk_text(text)
+                    all_new_chunks.extend(chunks)
+
+        if all_new_chunks:
+            # ถ้ามี Vector Store เดิมอยู่แล้ว ให้เพิ่ม Chunks ใหม่เข้าไป
+            if session_data["vector_store"] is not None:
+                session_data["vector_store"].add_texts(all_new_chunks)
             else:
-                raise ValueError("ไม่พบเนื้อหาที่แบ่งเป็นส่วนๆ ได้ในไฟล์นี้")
-        else:
-            raise ValueError("ไม่สามารถอ่านข้อความจากไฟล์ที่อัปโหลดได้")
+                # ถ้ายังไม่มี ให้สร้างใหม่
+                session_data["vector_store"] = FAISS.from_texts(all_new_chunks, embedding=embeddings)
 
     # 3. ค้นหาเอกสารอ้างอิงจาก Vector Store ที่อยู่ใน Session
     vector_store = session_data.get("vector_store")
@@ -156,7 +159,7 @@ def ask_chatbot(
         context_text = "\n\n".join([doc.page_content for doc in docs])
     else:
         # กรณีไม่มีเอกสารอัปโหลดเลย ทั้งในรอบนี้และรอบก่อนๆ
-        context_text = "ไม่พบข้อมูลอ้างอิง เนื่องจากไม่ได้มีการอัปโหลดเอกสาร"
+        context_text = "ไม่มีข้อมูลจากเอกสารอ้างอิง (ผู้ใช้ยังไม่ได้อัปโหลดไฟล์ในเซสชันนี้)"
 
     # 4. สั่งให้ Chain ตอบคำถาม
     response = chain.invoke(

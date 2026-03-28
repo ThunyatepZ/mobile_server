@@ -30,7 +30,7 @@ def ask_question(request: ChatRequest, token: str = Depends(oauth2_scheme)):
 @router.post("/ask-upload")
 async def ask_question_with_upload(
     question: str = Form(...),
-    file: UploadFile | None = File(default=None),
+    files: list[UploadFile] = File(default=[]),
     token: str = Depends(oauth2_scheme),
 ):
     try:
@@ -43,18 +43,19 @@ async def ask_question_with_upload(
 
     session_id = token_data.email
 
-    file_bytes = None
-    filename = None
-    if file is not None:
-        file_bytes = await file.read()
-        filename = file.filename or "uploaded_file"
+    uploaded_files_data = []
+    for file in files:
+        content = await file.read()
+        uploaded_files_data.append({
+            "bytes": content,
+            "filename": file.filename or "uploaded_file"
+        })
 
     try:
         answer = ask_chatbot(
             session_id=session_id,
             question=question,
-            uploaded_file_bytes=file_bytes,
-            uploaded_filename=filename,
+            uploaded_files=uploaded_files_data,
         )
         return {"answer": answer}
     except ValueError as exc:

@@ -222,13 +222,11 @@ ORDER BY a.completed_at DESC;
         # 6️⃣ ดึงทุกแถวที่ได้จาก query
         rows = cursor.fetchall()
 
-        # 7️⃣ เตรียม list สำหรับเก็บผลลัพธ์
         history = []
 
-        # 8️⃣ วนลูปแต่ละแถวที่ได้จาก DB
         for attempt_row in rows:
             
-            # unpack tuple
+
             attempt_id, quiz_id, quiz_title, score, total, completed_at = attempt_row
 
             # 9️⃣ แปลงเป็น dict แล้วเพิ่มเข้า list
@@ -243,14 +241,13 @@ ORDER BY a.completed_at DESC;
                 }
             )
 
-        # 🔟 ส่งข้อมูลกลับไป frontend
+
         return {
             "status": "success",
             "history": history
         }
 
     except Exception as e:
-        # ถ้า query พัง
         return {
             "status": "error",
             "message": str(e)
