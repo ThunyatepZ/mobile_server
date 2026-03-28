@@ -7,29 +7,56 @@ from langchain_classic.memory import ConversationBufferWindowMemory
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_huggingface import HuggingFaceEmbeddings
-from langchain_community.vectorstores import FAISS
 from langchain_openai import ChatOpenAI
 from langchain_experimental.text_splitter import SemanticChunker
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+from langchain_pinecone import PineconeVectorStore
+from pinecone import Pinecone, ServerlessSpec
 
 # โหลด Environment Variables
 load_dotenv()
 
-# โหลด Embeddings ให้ใช้แพ็กเกจใหม่เพื่อแก้แจ้งเตือน Warning
+# ────────────────────────────────────────────────────────────
+# Embeddings  (BAAI/bge-m3 → dimension 1024)
+# ────────────────────────────────────────────────────────────
 embeddings = HuggingFaceEmbeddings(
     model_name="BAAI/bge-m3",
     encode_kwargs={"normalize_embeddings": True},
 )
 
-# ตั้งค่า LLM (Typhoon) เป็น temp=0.0 เพื่อความแม่นยำสูงสุด
+# ────────────────────────────────────────────────────────────
+# Pinecone
+# ────────────────────────────────────────────────────────────
+PINECONE_INDEX_NAME = "learnify-docs"
+
+pc = Pinecone(api_key=os.getenv("PINECONE_API_KEY"))
+
+# สร้าง index ถ้ายังไม่มี
+existing_indexes = [idx["name"] for idx in pc.list_indexes()]
+if PINECONE_INDEX_NAME not in existing_indexes:
+    pc.create_index(
+        name=PINECONE_INDEX_NAME,
+        dimension=1024,  # ตรงกับ BAAI/bge-m3
+        metric="cosine",
+        spec=ServerlessSpec(cloud="aws", region="us-east-1"),
+    )
+
+pinecone_index = pc.Index(PINECONE_INDEX_NAME)
+
+# ────────────────────────────────────────────────────────────
+# LLM (Typhoon)
+# ────────────────────────────────────────────────────────────
 llm = ChatOpenAI(
     base_url="https://api.opentyphoon.ai/v1",
     api_key=os.getenv("TYPHOON_KEY"),
     model="typhoon-v2.5-30b-a3b-instruct",
     temperature=0.0,
-    max_tokens=8000,
+    max_tokens=8192,
 )
 
-# ตั้งค่า Prompt รวม MessagesPlaceholder เพื่อเก็บ History
+# ────────────────────────────────────────────────────────────
+# Prompt
+# ────────────────────────────────────────────────────────────
 prompt = ChatPromptTemplate.from_messages([
     (
         "system",
@@ -45,28 +72,26 @@ prompt = ChatPromptTemplate.from_messages([
 ])
 
 parser = StrOutputParser()
-
-# เชื่อม Chain หลัก
 chain = prompt | llm | parser
 
-# จำลองหน่วยความจำในเครื่อง เพื่อใช้เก็บ Chat History แบบแยกตามคน
-store = {}
+# Chat History (in-memory แยกตาม session)
+memory_store = {}
 
 
-def get_session_data(session_id: str):
-    """ฟังก์ชันที่ใช้ดึงข้อมูล Session (Memory + VectorDB) ของผู้ใช้"""
-    if session_id not in store:
-        store[session_id] = {
-            "memory": ConversationBufferWindowMemory(
-                k=10,
-                memory_key="chat_history",
-                return_messages=True,
-            ),
-            "vector_store": None
-        }
-    return store[session_id]
+def get_session_memory(session_id: str) -> ConversationBufferWindowMemory:
+    """ดึง Chat Memory ของผู้ใช้ (เก็บ 10 รอบสนทนาล่าสุด)"""
+    if session_id not in memory_store:
+        memory_store[session_id] = ConversationBufferWindowMemory(
+            k=10,
+            memory_key="chat_history",
+            return_messages=True,
+        )
+    return memory_store[session_id]
 
 
+# ────────────────────────────────────────────────────────────
+# File Processing Helpers
+# ────────────────────────────────────────────────────────────
 def _extract_text_from_uploaded_file(file_bytes: bytes, filename: str) -> str:
     lower_name = (filename or "").lower()
 
@@ -74,7 +99,7 @@ def _extract_text_from_uploaded_file(file_bytes: bytes, filename: str) -> str:
         try:
             from pypdf import PdfReader
         except ImportError as exc:
-            raise ValueError("ยังไม่รองรับ PDF เพราะยังไม่ได้ติดตั้ง pypdf (ลอง pip install pypdf)") from exc
+            raise ValueError("ยังไม่รองรับ PDF เพราะยังไม่ได้ติดตั้ง pypdf") from exc
 
         reader = PdfReader(io.BytesIO(file_bytes))
         pages = [page.extract_text() or "" for page in reader.pages]
@@ -93,29 +118,88 @@ def _extract_text_from_uploaded_file(file_bytes: bytes, filename: str) -> str:
 def _chunk_text(text: str) -> List[str]:
     if not text:
         return []
-    
-    splitter = SemanticChunker(
-        embeddings,
-        breakpoint_threshold_type="percentile"
+
+    # 1. Pre-split ด้วยขนาดปานกลาง เพื่อกัน OOM หากเอกสารมีขนาดใหญ่เกินไป
+    pre_splitter = RecursiveCharacterTextSplitter(
+        chunk_size=3000,
+        chunk_overlap=0, # ไม่ทำ overlap ตรงนี้ เพราะเดี๋ยว SemanticChunker จะเช็คความสัมพันธ์เอง
     )
-    return splitter.split_text(text)
+    pre_chunks = pre_splitter.split_text(text)
+
+    # 2. ทำ Semantic Chunking ควบคู่ด้วย เพื่อรักษาความหมายของกระโยคไม่ให้ขาดตอน (ลดการหลอน)
+    semantic_splitter = SemanticChunker(
+        embeddings,
+        breakpoint_threshold_type="percentile",
+    )
+
+    final_chunks = []
+    for chunk in pre_chunks:
+        try:
+            # หั่นแบบรักษากลุ่มความหมาย
+            semantic_chunks = semantic_splitter.split_text(chunk)
+            final_chunks.extend(semantic_chunks)
+        except Exception:
+            # Fallback เผื่อเจอ Error ในบางก้อน
+            final_chunks.append(chunk)
+
+    return final_chunks if final_chunks else pre_chunks
 
 
-def _build_context_from_uploaded_file(question: str, file_bytes: bytes, filename: str) -> str:
-    text = _extract_text_from_uploaded_file(file_bytes, filename)
-    if not text:
-        raise ValueError("ไม่สามารถอ่านข้อความจากไฟล์ที่อัปโหลดได้")
-
-    chunks = _chunk_text(text)
-    if not chunks:
-        raise ValueError("ไม่พบเนื้อหาที่ใช้สร้าง context จากไฟล์นี้")
-
-    # สร้าง Vector Store ชั่วคราวจากไฟล์ที่อัปโหลด
-    uploaded_db = FAISS.from_texts(chunks, embedding=embeddings)
-    docs = uploaded_db.similarity_search(question, k=min(4, len(chunks)))
-    return "\n\n".join([doc.page_content for doc in docs])
+# ────────────────────────────────────────────────────────────
+# Pinecone Helpers
+# ────────────────────────────────────────────────────────────
+def _clear_namespace(namespace: str):
+    """ลบ vectors ทั้งหมดใน namespace นั้น (= ลบเอกสารเก่าของ user)"""
+    try:
+        pinecone_index.delete(delete_all=True, namespace=namespace)
+    except Exception:
+        # namespace อาจยังไม่เคยมี data → ไม่ต้อง error
+        pass
 
 
+def _upsert_chunks_to_pinecone(chunks: List[str], namespace: str):
+    """อัปโหลด chunks เข้า Pinecone ใน namespace ของ user"""
+    PineconeVectorStore.from_texts(
+        texts=chunks,
+        embedding=embeddings,
+        index_name=PINECONE_INDEX_NAME,
+        namespace=namespace,
+    )
+
+
+def _search_pinecone(question: str, namespace: str, k: int = 4) -> str:
+    """ค้นหา chunks ที่เกี่ยวข้องจาก Pinecone"""
+    vector_store = PineconeVectorStore(
+        index=pinecone_index,
+        embedding=embeddings,
+        namespace=namespace,
+    )
+
+    docs = vector_store.similarity_search(question, k=k)
+    if not docs:
+        return ""
+
+    context_text = "\n\n".join([doc.page_content for doc in docs])
+    # Trim ไม่ให้ context ยาวเกินไป
+    if len(context_text) > 3000:
+        context_text = context_text[:3000] + "\n...(ตัดทอนเนื้อหาบางส่วน)"
+    return context_text
+
+
+def _check_namespace_has_data(namespace: str) -> bool:
+    """เช็คว่า namespace นี้มี vectors อยู่หรือไม่"""
+    try:
+        stats = pinecone_index.describe_index_stats()
+        namespaces = stats.get("namespaces", {})
+        ns_info = namespaces.get(namespace, {})
+        return ns_info.get("vector_count", 0) > 0
+    except Exception:
+        return False
+
+
+# ────────────────────────────────────────────────────────────
+# Main Function
+# ────────────────────────────────────────────────────────────
 def ask_chatbot(
     session_id: str,
     question: str,
@@ -123,20 +207,23 @@ def ask_chatbot(
 ) -> str:
     """
     ฟังก์ชันหลักที่ให้ Endpoint เรียกใช้งาน
-    สามารถจำเอกสารที่เคยอัปโหลดไว้ก่อนหน้าใน Session เดียวกันได้
+    - ถ้ามีไฟล์อัปโหลดมา → ลบ chunks เดิม → เพิ่ม chunks ใหม่ใน Pinecone
+    - ถ้าไม่มีไฟล์ → ใช้ chunks เดิมที่อยู่ใน Pinecone
     """
-    # 1. โหลดข้อมูล Session
-    session_data = get_session_data(session_id)
-    memory = session_data["memory"]
+    # 1. โหลด Chat History
+    memory = get_session_memory(session_id)
     chat_history = memory.load_memory_variables({})["chat_history"]
 
-    # 2. จัดการไฟล์อัปโหลด (ถ้ามีส่งมาใหม่ ให้เพิ่มเข้าไปใน Vector Store เดิม)
+    # namespace = email ของ user (session_id)
+    namespace = session_id
+
+    # 2. จัดการไฟล์อัปโหลด
     if uploaded_files:
         all_new_chunks = []
         for file_data in uploaded_files:
             file_bytes = file_data.get("bytes")
             filename = file_data.get("filename")
-            
+
             if file_bytes and filename:
                 text = _extract_text_from_uploaded_file(file_bytes, filename)
                 if text:
@@ -144,21 +231,14 @@ def ask_chatbot(
                     all_new_chunks.extend(chunks)
 
         if all_new_chunks:
-            # ถ้ามี Vector Store เดิมอยู่แล้ว ให้เพิ่ม Chunks ใหม่เข้าไป
-            if session_data["vector_store"] is not None:
-                session_data["vector_store"].add_texts(all_new_chunks)
-            else:
-                # ถ้ายังไม่มี ให้สร้างใหม่
-                session_data["vector_store"] = FAISS.from_texts(all_new_chunks, embedding=embeddings)
+            # ลบ chunks เก่าทิ้ง → เพิ่ม chunks ใหม่ทั้งหมด
+            _clear_namespace(namespace)
+            _upsert_chunks_to_pinecone(all_new_chunks, namespace)
 
-    # 3. ค้นหาเอกสารอ้างอิงจาก Vector Store ที่อยู่ใน Session
-    vector_store = session_data.get("vector_store")
-    if vector_store:
-        # ค้นหาข้อมูลที่ใกล้เคียงที่สุด 4 ส่วน
-        docs = vector_store.similarity_search(question, k=4)
-        context_text = "\n\n".join([doc.page_content for doc in docs])
+    # 3. ค้นหา context จาก Pinecone
+    if _check_namespace_has_data(namespace):
+        context_text = _search_pinecone(question, namespace)
     else:
-        # กรณีไม่มีเอกสารอัปโหลดเลย ทั้งในรอบนี้และรอบก่อนๆ
         context_text = "ไม่มีข้อมูลจากเอกสารอ้างอิง (ผู้ใช้ยังไม่ได้อัปโหลดไฟล์ในเซสชันนี้)"
 
     # 4. สั่งให้ Chain ตอบคำถาม
@@ -170,7 +250,7 @@ def ask_chatbot(
         }
     )
 
-    # 5. บันทึกคำถามของ User และคำตอบของ AI ลง Memory
+    # 5. บันทึก Chat History
     memory.save_context(
         {"input": question},
         {"output": response},
