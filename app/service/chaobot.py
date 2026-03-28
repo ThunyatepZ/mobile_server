@@ -1,5 +1,6 @@
 import io
 import os
+import re
 from typing import List, Optional
 
 from dotenv import load_dotenv
@@ -8,44 +9,31 @@ from langchain_core.output_parsers import StrOutputParser
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_openai import ChatOpenAI
-from langchain_experimental.text_splitter import SemanticChunker
-from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_pinecone import PineconeVectorStore
+from langchain_text_splitters import RecursiveCharacterTextSplitter
 from pinecone import Pinecone, ServerlessSpec
 
-# โหลด Environment Variables
 load_dotenv()
 
-# ────────────────────────────────────────────────────────────
-# Embeddings  (BAAI/bge-m3 → dimension 1024)
-# ────────────────────────────────────────────────────────────
 embeddings = HuggingFaceEmbeddings(
     model_name="BAAI/bge-m3",
     encode_kwargs={"normalize_embeddings": True},
 )
 
-# ────────────────────────────────────────────────────────────
-# Pinecone
-# ────────────────────────────────────────────────────────────
 PINECONE_INDEX_NAME = "learnify-docs"
 
 pc = Pinecone(api_key=os.getenv("PINECONE_API_KEY"))
-
-# สร้าง index ถ้ายังไม่มี
 existing_indexes = [idx["name"] for idx in pc.list_indexes()]
 if PINECONE_INDEX_NAME not in existing_indexes:
     pc.create_index(
         name=PINECONE_INDEX_NAME,
-        dimension=1024,  # ตรงกับ BAAI/bge-m3
+        dimension=1024,
         metric="cosine",
         spec=ServerlessSpec(cloud="aws", region="us-east-1"),
     )
 
 pinecone_index = pc.Index(PINECONE_INDEX_NAME)
 
-# ────────────────────────────────────────────────────────────
-# LLM (Typhoon)
-# ────────────────────────────────────────────────────────────
 llm = ChatOpenAI(
     base_url="https://api.opentyphoon.ai/v1",
     api_key=os.getenv("TYPHOON_KEY"),
@@ -54,18 +42,18 @@ llm = ChatOpenAI(
     max_tokens=8192,
 )
 
-# ────────────────────────────────────────────────────────────
-# Prompt
-# ────────────────────────────────────────────────────────────
 prompt = ChatPromptTemplate.from_messages([
     (
         "system",
         "คุณคือ 'Learnify Bot' ผู้ช่วยส่วนตัวที่ฉลาดและเป็นมิตร หน้าที่ของคุณคือช่วยผู้ใช้เรียนรู้และทำความเข้าใจเนื้อหาต่างๆ\n\n"
         "ข้อควรปฏิบัติ:\n"
-        "1. หากผู้ใช้อัปโหลดเอกสารมา (ดูจาก Context) ให้เน้นตอบโดยอิงจากข้อมูลในเอกสารนั้นเป็นหลัก และให้คำอธิบายที่ละเอียดและเข้าใจง่าย\n"
-        "2. หากข้อมูลที่ถามไม่มีในเอกสาร หรือผู้ใช้ยังไม่ได้อัปโหลดเอกสาร คุณสามารถตอบโดยใช้ความรู้ทั่วไปที่คุณมีได้ตามความเหมาะสม แต่ควรแจ้งให้ผู้ทราบหากข้อมูลนั้นไม่ได้มาจากเอกสารที่เขาให้มา\n"
+        "1. หากผู้ใช้อัปโหลดเอกสารมา (ดูจาก Context) ให้เน้นตอบโดยอิงจากข้อมูลในเอกสารนั้นเป็นหลัก\n"
+        "2. หากข้อมูลที่ถามไม่มีในเอกสาร หรือผู้ใช้ยังไม่ได้อัปโหลดเอกสาร คุณสามารถตอบโดยใช้ความรู้ทั่วไปที่คุณมีได้ตามความเหมาะสม แต่ควรแจ้งให้ผู้ใช้ทราบหากข้อมูลนั้นไม่ได้มาจากเอกสารที่เขาให้มา\n"
         "3. ให้คำแนะนำด้วยน้ำเสียงที่เป็นมิตร กระตือรือร้น และส่งเสริมการเรียนรู้\n"
-        "4. หากผู้ใช้ถามถึงเนื้อหาที่ต้องอาศัยข้อมูลเฉพาะเจาะจงแต่ 'ยังไม่มีการอัปโหลดเอกสารเลยในเซสชันนี้' ให้แนะนำอย่างสุภาพว่าเขาสามารถอัปโหลดไฟล์ (PDF/Text) เพื่อให้คุณช่วยวิเคราะห์เนื้อหานั้นได้อย่างแม่นยำยิ่งขึ้น",
+        "4. ให้ตอบแบบสรุปสั้น กระชับ เป็นค่าเริ่มต้น โดยปกติไม่เกิน 3-5 บรรทัด หรือ 3 bullet สั้นๆ\n"
+        "5. ถ้าผู้ใช้ถามหาข้อมูลเฉพาะ เช่น ชื่ออาจารย์ รหัสวิชา จำนวนหน่วยกิต ให้ตอบเป็นคำตอบตรงๆก่อน ไม่ต้องเกริ่นยาว\n"
+        "6. ให้ลงรายละเอียดเพิ่มเติมเฉพาะเมื่อผู้ใช้ขอ เช่น ขอแบบละเอียด, อธิบายเพิ่ม, ยกตัวอย่าง, หรือถามต่อ\n"
+        "7. หากผู้ใช้ถามถึงเนื้อหาที่ต้องอาศัยข้อมูลเฉพาะเจาะจงแต่ยังไม่มีการอัปโหลดเอกสารเลยในเซสชันนี้ ให้แนะนำอย่างสุภาพว่าเขาสามารถอัปโหลดไฟล์ (PDF/Text) เพื่อให้คุณช่วยวิเคราะห์เนื้อหานั้นได้อย่างแม่นยำยิ่งขึ้น",
     ),
     MessagesPlaceholder(variable_name="chat_history"),
     ("human", "ข้อมูลอ้างอิงจากเซสชันปัจจุบัน:\n{context}\n\nคำถาม: {question}"),
@@ -74,12 +62,10 @@ prompt = ChatPromptTemplate.from_messages([
 parser = StrOutputParser()
 chain = prompt | llm | parser
 
-# Chat History (in-memory แยกตาม session)
 memory_store = {}
 
 
 def get_session_memory(session_id: str) -> ConversationBufferWindowMemory:
-    """ดึง Chat Memory ของผู้ใช้ (เก็บ 10 รอบสนทนาล่าสุด)"""
     if session_id not in memory_store:
         memory_store[session_id] = ConversationBufferWindowMemory(
             k=10,
@@ -89,9 +75,6 @@ def get_session_memory(session_id: str) -> ConversationBufferWindowMemory:
     return memory_store[session_id]
 
 
-# ────────────────────────────────────────────────────────────
-# File Processing Helpers
-# ────────────────────────────────────────────────────────────
 def _extract_text_from_uploaded_file(file_bytes: bytes, filename: str) -> str:
     lower_name = (filename or "").lower()
 
@@ -103,7 +86,7 @@ def _extract_text_from_uploaded_file(file_bytes: bytes, filename: str) -> str:
 
         reader = PdfReader(io.BytesIO(file_bytes))
         pages = [page.extract_text() or "" for page in reader.pages]
-        return "\n".join(pages).strip()
+        return "\n\n".join(pages).strip()
 
     if lower_name.endswith((".txt", ".md", ".csv", ".json")):
         return file_bytes.decode("utf-8", errors="ignore").strip()
@@ -115,50 +98,121 @@ def _extract_text_from_uploaded_file(file_bytes: bytes, filename: str) -> str:
     raise ValueError("รองรับไฟล์ .pdf, .txt, .md, .csv, .json เป็นหลัก")
 
 
+def _normalize_extracted_text(text: str) -> str:
+    if not text:
+        return ""
+
+    normalized = text.replace("\r\n", "\n").replace("\r", "\n").replace("\x00", " ")
+    normalized = re.sub(r"[ \t]+", " ", normalized)
+    normalized = re.sub(r"\n{3,}", "\n\n", normalized)
+
+    lines = []
+    previous_blank = False
+    for raw_line in normalized.split("\n"):
+        line = raw_line.strip()
+        if not line:
+            if not previous_blank:
+                lines.append("")
+            previous_blank = True
+            continue
+
+        if lines and lines[-1] and not lines[-1].endswith((".", "?", "!", ":", ";")) and len(lines[-1]) < 140:
+            lines[-1] = f"{lines[-1]} {line}"
+        else:
+            lines.append(line)
+        previous_blank = False
+
+    normalized = "\n".join(lines).strip()
+    return re.sub(r"\n{3,}", "\n\n", normalized)
+
+
+def _looks_like_garbage(text: str) -> bool:
+    compact = re.sub(r"\s+", "", text or "")
+    if len(compact) < 40:
+        return False
+
+    alnum_count = sum(char.isalnum() for char in compact)
+    return (alnum_count / max(len(compact), 1)) < 0.45
+
+
+def _contains_priority_terms(text: str) -> bool:
+    lowered = (text or "").lower()
+    priority_terms = [
+        "อาจารย์",
+        "ผู้สอน",
+        "ผู้รับผิดชอบรายวิชา",
+        "ชื่อ",
+        "รายชื่อ",
+        "รายวิชา",
+        "รหัสวิชา",
+        "teacher",
+        "lecturer",
+        "instructor",
+        "course",
+        "subject",
+        "name",
+    ]
+    return any(term in lowered for term in priority_terms)
+
+
+def _expand_search_queries(question: str) -> List[str]:
+    normalized_question = _normalize_extracted_text(question)
+    lowered = normalized_question.lower()
+    queries = [normalized_question]
+
+    if any(keyword in lowered for keyword in ["อาจารย์", "ผู้สอน", "teacher", "lecturer", "instructor"]):
+        queries.append(f"{normalized_question} อาจารย์ผู้สอน ผู้รับผิดชอบรายวิชา")
+
+    if any(keyword in lowered for keyword in ["ชื่อ", "name"]):
+        queries.append(f"{normalized_question} รายชื่อ")
+
+    if any(keyword in lowered for keyword in ["วิชา", "course", "subject", "รายวิชา"]):
+        queries.append(f"{normalized_question} รายวิชา หมวดที่ 1 ข้อมูลทั่วไป")
+
+    return list(dict.fromkeys(query for query in queries if query))
+
+
 def _chunk_text(text: str) -> List[str]:
     if not text:
         return []
 
-    # 1. Pre-split ด้วยขนาดปานกลาง เพื่อกัน OOM หากเอกสารมีขนาดใหญ่เกินไป
+    cleaned_text = _normalize_extracted_text(text)
+    if not cleaned_text:
+        return []
+
     pre_splitter = RecursiveCharacterTextSplitter(
-        chunk_size=3000,
-        chunk_overlap=0, # ไม่ทำ overlap ตรงนี้ เพราะเดี๋ยว SemanticChunker จะเช็คความสัมพันธ์เอง
+        separators=["\n\n", "\n", ". ", " ", ""],
+        chunk_size=1400,
+        chunk_overlap=180,
     )
-    pre_chunks = pre_splitter.split_text(text)
+    pre_chunks = pre_splitter.split_text(cleaned_text)
 
-    # 2. ทำ Semantic Chunking ควบคู่ด้วย เพื่อรักษาความหมายของกระโยคไม่ให้ขาดตอน (ลดการหลอน)
-    semantic_splitter = SemanticChunker(
-        embeddings,
-        breakpoint_threshold_type="percentile",
-    )
-
-    final_chunks = []
+    deduped_chunks = []
+    seen = set()
     for chunk in pre_chunks:
-        try:
-            # หั่นแบบรักษากลุ่มความหมาย
-            semantic_chunks = semantic_splitter.split_text(chunk)
-            final_chunks.extend(semantic_chunks)
-        except Exception:
-            # Fallback เผื่อเจอ Error ในบางก้อน
-            final_chunks.append(chunk)
+        normalized_chunk = _normalize_extracted_text(chunk)
+        is_short = len(normalized_chunk) < 80
+        if _looks_like_garbage(normalized_chunk):
+            continue
+        if is_short and not _contains_priority_terms(normalized_chunk):
+            continue
+        key = normalized_chunk[:500]
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped_chunks.append(normalized_chunk)
 
-    return final_chunks if final_chunks else pre_chunks
+    return deduped_chunks
 
 
-# ────────────────────────────────────────────────────────────
-# Pinecone Helpers
-# ────────────────────────────────────────────────────────────
 def _clear_namespace(namespace: str):
-    """ลบ vectors ทั้งหมดใน namespace นั้น (= ลบเอกสารเก่าของ user)"""
     try:
         pinecone_index.delete(delete_all=True, namespace=namespace)
     except Exception:
-        # namespace อาจยังไม่เคยมี data → ไม่ต้อง error
         pass
 
 
 def _upsert_chunks_to_pinecone(chunks: List[str], namespace: str):
-    """อัปโหลด chunks เข้า Pinecone ใน namespace ของ user"""
     PineconeVectorStore.from_texts(
         texts=chunks,
         embedding=embeddings,
@@ -168,56 +222,56 @@ def _upsert_chunks_to_pinecone(chunks: List[str], namespace: str):
 
 
 def _search_pinecone(question: str, namespace: str, k: int = 4) -> str:
-    """ค้นหา chunks ที่เกี่ยวข้องจาก Pinecone"""
     vector_store = PineconeVectorStore(
         index=pinecone_index,
         embedding=embeddings,
         namespace=namespace,
     )
 
-    docs = vector_store.similarity_search(question, k=k)
+    docs = []
+    seen = set()
+    for query in _expand_search_queries(question):
+        try:
+            matched_docs = vector_store.similarity_search(query, k=k)
+        except Exception:
+            matched_docs = []
+
+        for doc in matched_docs:
+            content = doc.page_content.strip()
+            if content and content not in seen:
+                seen.add(content)
+                docs.append(doc)
+
     if not docs:
         return ""
 
-    context_text = "\n\n".join([doc.page_content for doc in docs])
-    # Trim ไม่ให้ context ยาวเกินไป
-    if len(context_text) > 3000:
-        context_text = context_text[:3000] + "\n...(ตัดทอนเนื้อหาบางส่วน)"
-    return context_text
+    selected_chunks = []
+    total_length = 0
+    for doc in docs:
+        chunk_text = _normalize_extracted_text(doc.page_content)
+        if not chunk_text or _looks_like_garbage(chunk_text):
+            continue
+        if len(chunk_text) < 80 and not _contains_priority_terms(chunk_text):
+            continue
+
+        if selected_chunks and total_length + len(chunk_text) > 3200:
+            break
+
+        selected_chunks.append(chunk_text)
+        total_length += len(chunk_text)
+
+    return "\n\n".join(selected_chunks)
 
 
-def _check_namespace_has_data(namespace: str) -> bool:
-    """เช็คว่า namespace นี้มี vectors อยู่หรือไม่"""
-    try:
-        stats = pinecone_index.describe_index_stats()
-        namespaces = stats.get("namespaces", {})
-        ns_info = namespaces.get(namespace, {})
-        return ns_info.get("vector_count", 0) > 0
-    except Exception:
-        return False
-
-
-# ────────────────────────────────────────────────────────────
-# Main Function
-# ────────────────────────────────────────────────────────────
 def ask_chatbot(
     session_id: str,
     question: str,
     uploaded_files: Optional[List[dict]] = None,
 ) -> str:
-    """
-    ฟังก์ชันหลักที่ให้ Endpoint เรียกใช้งาน
-    - ถ้ามีไฟล์อัปโหลดมา → ลบ chunks เดิม → เพิ่ม chunks ใหม่ใน Pinecone
-    - ถ้าไม่มีไฟล์ → ใช้ chunks เดิมที่อยู่ใน Pinecone
-    """
-    # 1. โหลด Chat History
     memory = get_session_memory(session_id)
     chat_history = memory.load_memory_variables({})["chat_history"]
-
-    # namespace = email ของ user (session_id)
     namespace = session_id
 
-    # 2. จัดการไฟล์อัปโหลด
     if uploaded_files:
         all_new_chunks = []
         for file_data in uploaded_files:
@@ -227,21 +281,16 @@ def ask_chatbot(
             if file_bytes and filename:
                 text = _extract_text_from_uploaded_file(file_bytes, filename)
                 if text:
-                    chunks = _chunk_text(text)
-                    all_new_chunks.extend(chunks)
+                    all_new_chunks.extend(_chunk_text(text))
 
         if all_new_chunks:
-            # ลบ chunks เก่าทิ้ง → เพิ่ม chunks ใหม่ทั้งหมด
             _clear_namespace(namespace)
             _upsert_chunks_to_pinecone(all_new_chunks, namespace)
 
-    # 3. ค้นหา context จาก Pinecone
-    if _check_namespace_has_data(namespace):
-        context_text = _search_pinecone(question, namespace)
-    else:
+    context_text = _search_pinecone(question, namespace)
+    if not context_text:
         context_text = "ไม่มีข้อมูลจากเอกสารอ้างอิง (ผู้ใช้ยังไม่ได้อัปโหลดไฟล์ในเซสชันนี้)"
 
-    # 4. สั่งให้ Chain ตอบคำถาม
     response = chain.invoke(
         {
             "chat_history": chat_history,
@@ -250,7 +299,6 @@ def ask_chatbot(
         }
     )
 
-    # 5. บันทึก Chat History
     memory.save_context(
         {"input": question},
         {"output": response},
