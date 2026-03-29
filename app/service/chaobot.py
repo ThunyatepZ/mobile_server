@@ -1,5 +1,6 @@
 import io
 import os
+import re
 from typing import List, Optional
 
 from dotenv import load_dotenv
@@ -91,18 +92,148 @@ def _extract_text_from_uploaded_file(file_bytes: bytes, filename: str) -> str:
     raise ValueError("รองรับไฟล์ .pdf, .txt, .md, .csv, .json เป็นหลัก")
 
 
-def _chunk_text(text: str) -> List[str]:
-    """แบ่ง Chunk ข้อความโดยใช้ RecursiveCharacterTextSplitter เพื่อคุณภาพที่ดีขึ้น"""
-    if not text:
-        return []
+# def _chunk_text(text: str) -> List[str]:
+#     """แบ่ง Chunk ข้อความโดยใช้ RecursiveCharacterTextSplitter เพื่อคุณภาพที่ดีขึ้น"""
+#     if not text:
+#         return []
     
-    splitter = RecursiveCharacterTextSplitter(
-        chunk_size=1000,
-        chunk_overlap=200,
-        length_function=len,
-        separators=["\n\n", "\n", " ", ""]
-    )
-    return splitter.split_text(text)
+#     splitter = RecursiveCharacterTextSplitter(
+#         chunk_size=1000,
+#         chunk_overlap=200,
+#         length_function=len,
+#         separators=["\n\n", "\n", " ", ""]
+#     )
+#     return splitter.split_text(text)
+
+def _chunk_text(text: str) -> List[str]:
+    """
+    Semantic chunk แบบไม่ไปแตะส่วนอื่นของระบบ
+    แนวคิด:
+    1) แบ่งเอกสารเป็น paragraph / section ก่อน
+    2) รวม paragraph ที่มีความต่อเนื่องกันจนกว่าจะใกล้เต็ม chunk
+    3) ถ้า paragraph ไหนยาวเกินไป ค่อย split ย่อยด้วย sentence
+    """
+    if not text or not text.strip():
+        return []
+
+    text = text.strip()
+
+    # ปรับ whitespace ให้สะอาดขึ้น แต่ยังคง \n\n สำหรับแบ่งย่อหน้า
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    text = re.sub(r"[ \t]+", " ", text)
+
+    target_chunk_size = 1000
+    max_chunk_size = 1200
+    min_chunk_size = 300
+
+    # แบ่งแบบ semantic เบื้องต้นด้วย paragraph
+    paragraphs = [p.strip() for p in re.split(r"\n\s*\n", text) if p.strip()]
+    if not paragraphs:
+        return []
+
+    chunks: List[str] = []
+    current_chunk: List[str] = []
+    current_len = 0
+
+    def flush_current():
+        nonlocal current_chunk, current_len
+        if current_chunk:
+            chunks.append("\n\n".join(current_chunk).strip())
+            current_chunk = []
+            current_len = 0
+
+    def split_long_paragraph(paragraph: str) -> List[str]:
+        """
+        ถ้าย่อหน้ายาวเกินไป ให้ split ตาม sentence ก่อน
+        ถ้ายังยาวอีก ค่อย fallback เป็น character splitter
+        """
+        if len(paragraph) <= max_chunk_size:
+            return [paragraph]
+
+        # แยก sentence ไทย/อังกฤษแบบง่าย ๆ
+        sentences = re.split(r"(?<=[\.\!\?\n])\s+|(?<=।)\s+", paragraph)
+        sentences = [s.strip() for s in sentences if s.strip()]
+
+        if not sentences:
+            fallback_splitter = RecursiveCharacterTextSplitter(
+                chunk_size=target_chunk_size,
+                chunk_overlap=150,
+                length_function=len,
+                separators=["\n\n", "\n", " ", ""]
+            )
+            return fallback_splitter.split_text(paragraph)
+
+        parts: List[str] = []
+        buffer: List[str] = []
+        buffer_len = 0
+
+        for sent in sentences:
+            sent_len = len(sent)
+
+            if buffer and buffer_len + sent_len + 1 > max_chunk_size:
+                parts.append(" ".join(buffer).strip())
+                buffer = [sent]
+                buffer_len = sent_len
+            else:
+                buffer.append(sent)
+                buffer_len += sent_len + (1 if buffer else 0)
+
+        if buffer:
+            parts.append(" ".join(buffer).strip())
+
+        # ถ้ายังมี part ที่ยาวเกินอีก ค่อย fallback
+        final_parts: List[str] = []
+        fallback_splitter = RecursiveCharacterTextSplitter(
+            chunk_size=target_chunk_size,
+            chunk_overlap=150,
+            length_function=len,
+            separators=["\n\n", "\n", " ", ""]
+        )
+
+        for part in parts:
+            if len(part) > max_chunk_size:
+                final_parts.extend(fallback_splitter.split_text(part))
+            else:
+                final_parts.append(part)
+
+        return final_parts
+
+    for para in paragraphs:
+        para_parts = split_long_paragraph(para)
+
+        for part in para_parts:
+            part_len = len(part)
+
+            # ถ้ายังพอรวมใน chunk เดิมได้ ก็รวม
+            if current_chunk and current_len + part_len + 2 <= target_chunk_size:
+                current_chunk.append(part)
+                current_len += part_len + 2
+                continue
+
+            # ถ้า chunk เดิมมีขนาดพอแล้ว ค่อยปิด chunk
+            if current_chunk and current_len >= min_chunk_size:
+                flush_current()
+
+            # เริ่ม chunk ใหม่
+            current_chunk.append(part)
+            current_len = part_len
+
+            # ถ้ายาวมาก ก็ปิดทันที
+            if current_len >= max_chunk_size:
+                flush_current()
+
+    flush_current()
+
+    # กันกรณี chunk ท้ายสั้นมาก ให้ไปรวมกับอันก่อน
+    merged_chunks: List[str] = []
+    for chunk in chunks:
+        if merged_chunks and len(chunk) < 150:
+            merged_chunks[-1] = merged_chunks[-1].rstrip() + "\n\n" + chunk
+        else:
+            merged_chunks.append(chunk)
+
+    return merged_chunks
 
 
 def _build_context_from_uploaded_file(question: str, file_bytes: bytes, filename: str) -> str:
