@@ -239,3 +239,37 @@ def submit_quiz_attempt(req: QuizSubmitRequest, token: str = Depends(oauth2_sche
     finally:
         cursor.close()
 
+@router.delete("/{quiz_id}")
+def delete_quiz(quiz_id: str, token: str = Depends(oauth2_scheme), conn=Depends(get_db)):
+    try:
+        token_data = decoder_token(token)
+    except Exception:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
+
+    cursor = conn.cursor()
+    try:
+        # Verify Ownership
+        user_id = _get_user_id_from_email(conn, token_data.email)
+        cursor.execute("SELECT creator_id FROM quizzes WHERE id = %s;", (quiz_id,))
+        row = cursor.fetchone()
+        
+        if not row:
+            raise HTTPException(status_code=404, detail="Quiz not found")
+        
+        if str(row[0]) != str(user_id):
+            raise HTTPException(status_code=403, detail="You don't have permission to delete this quiz")
+
+        # Delete related data in order
+        cursor.execute("DELETE FROM attempts WHERE quiz_id = %s;", (quiz_id,))
+        cursor.execute("DELETE FROM questions WHERE quiz_id = %s;", (quiz_id,))
+        cursor.execute("DELETE FROM quizzes WHERE id = %s;", (quiz_id,))
+        
+        conn.commit()
+        return {"status": "success", "message": "Quiz deleted successfully"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        conn.rollback()
+        return {"status": "error", "message": str(e)}
+    finally:
+        cursor.close()
