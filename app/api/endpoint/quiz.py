@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File
+from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File, Form
 from pydantic import BaseModel
 from typing import List
 import shutil
@@ -45,7 +45,12 @@ def _get_user_id_from_email(connection, email: str):
 
 @router.post("/generate")
 async def generate_quiz(
-    files: List[UploadFile] = File(...), 
+    files: List[UploadFile] = File(...),
+    num_questions: int = Form(5),
+    difficulty: str = Form("ปานกลาง"),
+    question_type: str = Form("ปรนัย"),
+    include_explanations: bool = Form(True),
+    focus_topic: str = Form(""),
     token: str = Depends(oauth2_scheme), 
     conn=Depends(get_db)
 ):
@@ -76,13 +81,32 @@ async def generate_quiz(
                 with open(temp_path, "r", encoding="utf-8") as f:
                     combined_text += f.read() + "\n"
         
-        quiz_json = generate_quiz_from_text(combined_text)
+        quiz_json = generate_quiz_from_text(
+            combined_text,
+            num_questions=num_questions,
+            difficulty=difficulty,
+            question_type=question_type,
+            include_explanations=include_explanations,
+            focus_topic=focus_topic,
+        )
         
         quiz_id = save_quiz_to_db(conn, user_id, quiz_json)
         
-        return {"status": "success", "quiz_id": str(quiz_id), "title": quiz_json['title']}
+        warning = None
+        if len(combined_text) > 6000 and not focus_topic.strip():
+            warning = "ไฟล์ค่อนข้างยาว ถ้าต้องการข้อสอบแม่นขึ้น ลองระบุหัวข้อที่ต้องการ"
+
+        return {
+            "status": "success",
+            "quiz_id": str(quiz_id),
+            "title": quiz_json['title'],
+            "warning": warning,
+        }
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        print(f"[quiz.generate] unexpected error: {repr(e)}")
+        raise HTTPException(status_code=500, detail="เกิดข้อผิดพลาดระหว่างสร้างข้อสอบ")
     finally:
         for temp_path in temporary_file_paths:
             if os.path.exists(temp_path):

@@ -1,7 +1,7 @@
 import io
 import os
 import re
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 from dotenv import load_dotenv
 from langchain_classic.memory import ConversationBufferWindowMemory
@@ -47,13 +47,15 @@ prompt = ChatPromptTemplate.from_messages([
         "system",
         "คุณคือ 'Learnify Bot' ผู้ช่วยส่วนตัวที่ฉลาดและเป็นมิตร หน้าที่ของคุณคือช่วยผู้ใช้เรียนรู้และทำความเข้าใจเนื้อหาต่างๆ\n\n"
         "ข้อควรปฏิบัติ:\n"
-        "1. หากผู้ใช้อัปโหลดเอกสารมา (ดูจาก Context) ให้เน้นตอบโดยอิงจากข้อมูลในเอกสารนั้นเป็นหลัก\n"
-        "2. หากข้อมูลที่ถามไม่มีในเอกสาร หรือผู้ใช้ยังไม่ได้อัปโหลดเอกสาร คุณสามารถตอบโดยใช้ความรู้ทั่วไปที่คุณมีได้ตามความเหมาะสม แต่ควรแจ้งให้ผู้ใช้ทราบหากข้อมูลนั้นไม่ได้มาจากเอกสารที่เขาให้มา\n"
+        "1. หากผู้ใช้อัปโหลดเอกสารมา (ดูจาก Context) ให้ตอบโดยอิงจากข้อมูลใน Context เป็นหลัก และห้ามเดาข้อมูลที่ไม่ได้อยู่ใน Context\n"
+        "2. ถ้าคำถามเป็นข้อมูลเฉพาะเจาะจง เช่น ชื่ออาจารย์ รหัสวิชา หน่วยกิต ตารางเรียน วันเวลา ห้องเรียน รายชื่อ หรือรายละเอียดเชิงข้อเท็จจริงอื่นๆ แต่ Context ไม่มีหลักฐานชัดเจน ให้ตอบตรงๆว่า 'ไม่พบข้อมูลนี้ในเอกสารที่อัปโหลด' และชวนผู้ใช้อัปโหลดเอกสารที่เกี่ยวข้องเพิ่ม แทนการคาดเดา\n"
+        "3. หากข้อมูลที่ถามไม่มีในเอกสาร หรือผู้ใช้ยังไม่ได้อัปโหลดเอกสาร คุณสามารถตอบโดยใช้ความรู้ทั่วไปที่คุณมีได้ตามความเหมาะสม แต่ต้องระบุให้ชัดว่าคำตอบส่วนนั้นเป็น 'ความรู้ทั่วไป' ไม่ใช่ข้อมูลจากเอกสาร\n"
         "3. ให้คำแนะนำด้วยน้ำเสียงที่เป็นมิตร กระตือรือร้น และส่งเสริมการเรียนรู้\n"
         "4. ให้ตอบแบบสรุปสั้น กระชับ เป็นค่าเริ่มต้น โดยปกติไม่เกิน 3-5 บรรทัด หรือ 3 bullet สั้นๆ\n"
         "5. ถ้าผู้ใช้ถามหาข้อมูลเฉพาะ เช่น ชื่ออาจารย์ รหัสวิชา จำนวนหน่วยกิต ให้ตอบเป็นคำตอบตรงๆก่อน ไม่ต้องเกริ่นยาว\n"
         "6. ให้ลงรายละเอียดเพิ่มเติมเฉพาะเมื่อผู้ใช้ขอ เช่น ขอแบบละเอียด, อธิบายเพิ่ม, ยกตัวอย่าง, หรือถามต่อ\n"
-        "7. หากผู้ใช้ถามถึงเนื้อหาที่ต้องอาศัยข้อมูลเฉพาะเจาะจงแต่ยังไม่มีการอัปโหลดเอกสารเลยในเซสชันนี้ ให้แนะนำอย่างสุภาพว่าเขาสามารถอัปโหลดไฟล์ (PDF/Text) เพื่อให้คุณช่วยวิเคราะห์เนื้อหานั้นได้อย่างแม่นยำยิ่งขึ้น",
+        "7. หากผู้ใช้ถามถึงเนื้อหาที่ต้องอาศัยข้อมูลเฉพาะเจาะจงแต่ยังไม่มีการอัปโหลดเอกสารเลยในเซสชันนี้ ให้แนะนำอย่างสุภาพว่าเขาสามารถอัปโหลดไฟล์ (PDF/Text) เพื่อให้คุณช่วยวิเคราะห์เนื้อหานั้นได้อย่างแม่นยำยิ่งขึ้น\n"
+        "8. ก่อนตอบ ให้เช็กตัวเองว่าทุกข้อเท็จจริงสำคัญมีหลักฐานจาก Context หรือมาจากความรู้ทั่วไปที่ระบุชัดแล้ว ถ้ายังไม่ชัด ให้ตอบว่าไม่แน่ใจหรือไม่พบข้อมูล แทนการเดา",
     ),
     MessagesPlaceholder(variable_name="chat_history"),
     ("human", "ข้อมูลอ้างอิงจากเซสชันปัจจุบัน:\n{context}\n\nคำถาม: {question}"),
@@ -63,6 +65,8 @@ parser = StrOutputParser()
 chain = prompt | llm | parser
 
 memory_store = {}
+document_sessions = set()
+session_uploaded_filenames: Dict[str, List[str]] = {}
 
 
 def get_session_memory(session_id: str) -> ConversationBufferWindowMemory:
@@ -151,8 +155,88 @@ def _contains_priority_terms(text: str) -> bool:
         "course",
         "subject",
         "name",
+        "เกรด",
+        "คะแนน",
+        "ประเมินผล",
+        "ตัดเกรด",
+        "ผ่าน",
+        "ตก",
+        "f",
+        "grade",
+        "grading",
+        "score",
+        "pass",
+        "fail",
     ]
     return any(term in lowered for term in priority_terms)
+
+
+def _tokenize_for_overlap(text: str) -> List[str]:
+    return re.findall(r"[A-Za-z0-9_]+|[ก-๙]+", (text or "").lower())
+
+
+def _truncate_text(text: str, max_chars: int) -> str:
+    normalized = _normalize_extracted_text(text)
+    if len(normalized) <= max_chars:
+        return normalized
+    return normalized[:max_chars].rstrip() + "\n...[truncated]"
+
+
+def _trim_chat_history(messages, max_messages: int = 4):
+    if not messages:
+        return []
+    return messages[-max_messages:]
+
+
+def _keyword_overlap_score(question: str, text: str) -> float:
+    question_tokens = set(_tokenize_for_overlap(question))
+    text_tokens = set(_tokenize_for_overlap(text))
+    if not question_tokens or not text_tokens:
+        return 0.0
+
+    ignored_tokens = {
+        "คือ", "และ", "หรือ", "the", "a", "an", "what", "when", "where",
+        "who", "why", "how", "ได้", "ไหม", "อะไร", "ของ", "ที่", "ใน",
+    }
+    filtered_question_tokens = {
+        token for token in question_tokens if len(token) > 1 and token not in ignored_tokens
+    }
+    if not filtered_question_tokens:
+        filtered_question_tokens = question_tokens
+
+    overlap = filtered_question_tokens & text_tokens
+    return len(overlap) / max(len(filtered_question_tokens), 1)
+
+
+def _is_specific_question(question: str) -> bool:
+    lowered = (question or "").lower()
+    specific_terms = [
+        "อาจารย์", "ผู้สอน", "ชื่อ", "รายชื่อ", "รหัสวิชา", "หน่วยกิต",
+        "section", "teacher", "lecturer", "instructor", "course code",
+        "credits", "room", "schedule", "เวลา", "ห้อง", "ตาราง",
+        "เกรด", "คะแนน", "ประเมินผล", "ตัดเกรด", "ผ่าน", "ตก", "ติดf",
+        "grade", "grading", "score", "pass", "fail",
+    ]
+    has_code = bool(re.search(r"[A-Za-z]{2,}\s*-?\d{2,}", question or ""))
+    return has_code or any(term in lowered for term in specific_terms)
+
+
+def _is_grading_question(question: str) -> bool:
+    lowered = re.sub(r"\s+", "", (question or "").lower())
+    grading_terms = [
+        "เกรด", "คะแนน", "ประเมินผล", "ตัดเกรด", "ผ่าน", "ตก", "ติดf",
+        "grade", "grading", "score", "pass", "fail",
+    ]
+    return any(term in lowered for term in grading_terms)
+
+
+def _is_exam_generation_question(question: str) -> bool:
+    lowered = (question or "").lower()
+    exam_terms = [
+        "ข้อสอบ", "แบบฝึกหัด", "quiz", "exam", "test",
+        "generate questions", "ออกข้อสอบ", "เจนข้อสอบ",
+    ]
+    return any(term in lowered for term in exam_terms)
 
 
 def _expand_search_queries(question: str) -> List[str]:
@@ -169,6 +253,9 @@ def _expand_search_queries(question: str) -> List[str]:
     if any(keyword in lowered for keyword in ["วิชา", "course", "subject", "รายวิชา"]):
         queries.append(f"{normalized_question} รายวิชา หมวดที่ 1 ข้อมูลทั่วไป")
 
+    if _is_grading_question(question):
+        queries.append(f"{normalized_question} การประเมินผล เกณฑ์คะแนน เกรด ตัดเกรด ผ่าน ตก F")
+
     return list(dict.fromkeys(query for query in queries if query))
 
 
@@ -182,8 +269,8 @@ def _chunk_text(text: str) -> List[str]:
 
     pre_splitter = RecursiveCharacterTextSplitter(
         separators=["\n\n", "\n", ". ", " ", ""],
-        chunk_size=1400,
-        chunk_overlap=180,
+        chunk_size=800,
+        chunk_overlap=120,
     )
     pre_chunks = pre_splitter.split_text(cleaned_text)
 
@@ -253,6 +340,10 @@ def _search_pinecone(question: str, namespace: str, k: int = 4) -> str:
             continue
         if len(chunk_text) < 80 and not _contains_priority_terms(chunk_text):
             continue
+        if _is_specific_question(question):
+            overlap_score = _keyword_overlap_score(question, chunk_text)
+            if overlap_score < 0.15 and not _contains_priority_terms(chunk_text):
+                continue
 
         if selected_chunks and total_length + len(chunk_text) > 3200:
             break
@@ -263,22 +354,72 @@ def _search_pinecone(question: str, namespace: str, k: int = 4) -> str:
     return "\n\n".join(selected_chunks)
 
 
+def _search_pinecone_chunks(question: str, namespace: str, k: int = 4) -> List[str]:
+    context_text = _search_pinecone(question, namespace, k=k)
+    if not context_text:
+        return []
+    return [chunk.strip() for chunk in context_text.split("\n\n") if chunk.strip()]
+
+
+def _build_references(chunks: List[str], filenames: Optional[List[str]] = None) -> List[dict]:
+    references = []
+    source_name = ", ".join(filenames or []) if filenames else "เอกสารที่อัปโหลด"
+    for chunk in chunks[:3]:
+        snippet = _truncate_text(chunk, 220)
+        if snippet:
+            references.append({
+                "source": source_name,
+                "snippet": snippet,
+            })
+    return references
+
+
+def _should_refuse_answer(question: str, context_text: str, has_uploaded_document: bool) -> bool:
+    if not _is_specific_question(question):
+        return False
+
+    normalized_context = _normalize_extracted_text(context_text)
+    if not normalized_context:
+        return has_uploaded_document
+
+    refusal_markers = [
+        "ไม่พบข้อมูลที่เกี่ยวข้องในเอกสารที่อัปโหลดสำหรับคำถามนี้",
+        "ไม่มีข้อมูลจากเอกสารอ้างอิง",
+    ]
+    if any(marker in normalized_context for marker in refusal_markers):
+        return True
+
+    if _is_grading_question(question):
+        has_grading_evidence = any(
+            term in normalized_context.lower()
+            for term in ["เกรด", "คะแนน", "ประเมินผล", "ตัดเกรด", "grade", "grading", "score", "pass", "fail", "f"]
+        )
+        has_numeric_evidence = bool(re.search(r"\d+", normalized_context))
+        if not (has_grading_evidence and has_numeric_evidence):
+            return True
+
+    return _keyword_overlap_score(question, normalized_context) < 0.12
+
+
 def ask_chatbot(
     session_id: str,
     question: str,
     uploaded_files: Optional[List[dict]] = None,
-) -> str:
+) -> dict:
     memory = get_session_memory(session_id)
     chat_history = memory.load_memory_variables({})["chat_history"]
     namespace = session_id
+    warning = None
 
     if uploaded_files:
         all_new_chunks = []
+        uploaded_names = []
         for file_data in uploaded_files:
             file_bytes = file_data.get("bytes")
             filename = file_data.get("filename")
 
             if file_bytes and filename:
+                uploaded_names.append(filename)
                 text = _extract_text_from_uploaded_file(file_bytes, filename)
                 if text:
                     all_new_chunks.extend(_chunk_text(text))
@@ -286,10 +427,51 @@ def ask_chatbot(
         if all_new_chunks:
             _clear_namespace(namespace)
             _upsert_chunks_to_pinecone(all_new_chunks, namespace)
+            document_sessions.add(session_id)
+            session_uploaded_filenames[session_id] = uploaded_names
 
-    context_text = _search_pinecone(question, namespace)
-    if not context_text:
-        context_text = "ไม่มีข้อมูลจากเอกสารอ้างอิง (ผู้ใช้ยังไม่ได้อัปโหลดไฟล์ในเซสชันนี้)"
+    context_chunks = _search_pinecone_chunks(question, namespace)
+    context_text = "\n\n".join(context_chunks)
+    if not context_chunks:
+        if session_id in document_sessions:
+            context_text = (
+                "ไม่พบข้อมูลที่เกี่ยวข้องในเอกสารที่อัปโหลดสำหรับคำถามนี้ "
+                "(ห้ามเดารายละเอียดที่ไม่มีหลักฐานจากเอกสาร)"
+            )
+            warning = "ไม่พบข้อมูลที่ชัดเจนพอในเอกสารสำหรับคำถามนี้"
+        else:
+            context_text = "ไม่มีข้อมูลจากเอกสารอ้างอิง (ผู้ใช้ยังไม่ได้อัปโหลดไฟล์ในเซสชันนี้)"
+            warning = "ยังไม่มีเอกสารในเซสชันนี้ ถ้าต้องการคำตอบจากไฟล์ แนะนำให้อัปโหลดเอกสารก่อน"
+
+    if _should_refuse_answer(question, context_text, session_id in document_sessions):
+        response = "ขอไม่ตอบแบบเดานะครับ เพราะไม่พบข้อมูลที่ชัดเจนพอในเอกสารที่อัปโหลด"
+        memory.save_context(
+            {"input": question},
+            {"output": response},
+        )
+        return {
+            "answer": response,
+            "references": _build_references(context_chunks, session_uploaded_filenames.get(session_id)),
+            "warning": "คำถามนี้ต้องอาศัยข้อมูลเฉพาะ แต่เอกสารยังไม่มีหลักฐานชัดเจนพอ",
+        }
+
+    if _is_exam_generation_question(question):
+        question = (
+            f"{question}\n\n"
+            "ข้อกำหนดเพิ่มเติม:\n"
+            "- ถ้าผู้ใช้ไม่ได้ระบุจำนวนข้อ ให้สร้างไม่เกิน 5 ข้อ\n"
+            "- คำอธิบายและเฉลยให้สั้น กระชับ\n"
+            "- ห้ามสร้างเนื้อหายาวเกินจำเป็น"
+        )
+        context_text = _truncate_text(context_text, 1200)
+        question = _truncate_text(question, 500)
+        chat_history = _trim_chat_history(chat_history, 2)
+        if len(context_chunks) >= 3:
+            warning = "หากต้องการข้อสอบแม่นขึ้น ลองระบุบทหรือหัวข้อที่ต้องการออกข้อสอบ"
+    else:
+        context_text = _truncate_text(context_text, 2200)
+        question = _truncate_text(question, 700)
+        chat_history = _trim_chat_history(chat_history, 4)
 
     response = chain.invoke(
         {
@@ -304,4 +486,8 @@ def ask_chatbot(
         {"output": response},
     )
 
-    return response
+    return {
+        "answer": response,
+        "references": _build_references(context_chunks, session_uploaded_filenames.get(session_id)),
+        "warning": warning,
+    }

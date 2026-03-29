@@ -23,8 +23,8 @@ def ask_question(request: ChatRequest, token: str = Depends(oauth2_scheme)):
 
     # ใช้ Email ของผู้ใช้ที่ล็อกอินเป็น Session_ID ของฝั่ง Memory
     session_id = token_data.email
-    answer = ask_chatbot(session_id, request.question)
-    return {"answer": answer}
+    result = ask_chatbot(session_id, request.question)
+    return result
 
 
 @router.post("/ask-upload")
@@ -52,11 +52,11 @@ async def ask_question_with_upload(
         })
 
     try:
-        answer = ask_chatbot(
+        result = ask_chatbot(
             session_id=session_id,
             question=question,
             uploaded_files=uploaded_files_data,
         )
-        return {"answer": answer}
+        return result
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))

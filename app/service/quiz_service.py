@@ -1,9 +1,11 @@
 import os
 import json
+import re
 from pypdf import PdfReader
 from langchain_openai import ChatOpenAI
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import JsonOutputParser
+from langchain_core.exceptions import OutputParserException
 from pydantic import BaseModel, Field
 from typing import List
 from dotenv import load_dotenv
@@ -16,7 +18,7 @@ llm = ChatOpenAI(
     api_key=os.getenv("TYPHOON_KEY"),
     model='typhoon-v2.5-30b-a3b-instruct',
     temperature=0.3,
-    max_tokens=8000
+    max_tokens=5000
 )
 
 class QuestionSchema(BaseModel):
@@ -34,7 +36,7 @@ parser = JsonOutputParser(pydantic_object=QuizSchema)
 
 prompt = ChatPromptTemplate.from_messages([
     ("system", 
-     "คุณคืออาจารย์ผู้เชี่ยวชาญด้านการออกข้อสอบ หน้าที่ของคุณคืออ่านเนื้อหาที่ได้รับแล้วสร้างข้อสอบแบบปรนัย (4 ตัวเลือก) จำนวน 5-10 ข้อ\n"
+     "คุณคืออาจารย์ผู้เชี่ยวชาญด้านการออกข้อสอบ หน้าที่ของคุณคืออ่านเนื้อหาที่ได้รับแล้วสร้างข้อสอบตามที่ผู้ใช้กำหนด\n"
      "ข้อกำหนด:\n"
      "1. สร้างคำถามที่วัดความเข้าใจ ไม่ใช่แค่การจำ\n"
      "2. ให้คำอธิบาย (explanation) ที่ชัดเจนสำหรับแต่ละข้อ\n"
@@ -46,26 +48,93 @@ prompt = ChatPromptTemplate.from_messages([
      "8. ห้ามสร้างคำถามที่ซ้ำกัน\n"
      "9. ใช้ภาษาไทยอย่างถูกต้องตามหลักภาษาไทย\n"
      ),
-    ("human", "เนื้อหาสำหรับออกข้อสอบ:\n{context}\n\n{format_instructions}")
+    ("human", "การตั้งค่า:\n{requirements}\n\nเนื้อหาสำหรับออกข้อสอบ:\n{context}\n\n{format_instructions}")
 ])
 
 quiz_chain = prompt | llm | parser
 
 def extract_text_from_pdf(file_path: str) -> str:
     reader = PdfReader(file_path)
-    text = ""
+    pages = []
     for page in reader.pages:
-        text += page.extract_text()
-    return text
+        try:
+            extracted = page.extract_text() or ""
+        except Exception:
+            extracted = ""
+        if extracted.strip():
+            pages.append(extracted)
+    return "\n".join(pages).strip()
 
-def generate_quiz_from_text(text: str) -> dict:
-    # Limit text to avoid token overflow (approx 4000 chars for safety)
-    truncated_text = text[:8000]
+def _normalize_text(text: str) -> str:
+    return re.sub(r"\s+", " ", (text or "")).strip()
+
+
+def _has_enough_text_for_quiz(text: str) -> bool:
+    normalized = _normalize_text(text)
+    if len(normalized) < 500:
+        return False
+
+    words = normalized.split()
+    return len(words) >= 80
+
+
+def generate_quiz_from_text(
+    text: str,
+    *,
+    num_questions: int = 5,
+    difficulty: str = "ปานกลาง",
+    question_type: str = "ปรนัย",
+    include_explanations: bool = True,
+    focus_topic: str = "",
+) -> dict:
+    safe_num_questions = max(3, min(num_questions, 10))
+    normalized_text = _normalize_text(text)
+    if not normalized_text:
+        raise ValueError("ไม่สามารถอ่านข้อความจากไฟล์ที่อัปโหลดได้ หรือไฟล์ไม่มีข้อความที่ใช้สร้างข้อสอบ")
+    if not _has_enough_text_for_quiz(normalized_text):
+        raise ValueError(
+            "ไฟล์นี้อ่านข้อความได้ไม่พอสำหรับสร้างข้อสอบ อาจเป็น PDF สแกนหรือไฟล์ที่เลือกข้อความไม่ได้ กรุณาใช้ PDF ที่เลือกข้อความได้หรือแปลงเป็นไฟล์ .txt"
+        )
+    truncated_text = normalized_text[:6000]
+    requirements = (
+        f"- จำนวนข้อ: {safe_num_questions} ข้อ\n"
+        f"- ระดับความยาก: {difficulty}\n"
+        f"- ประเภทข้อสอบ: {question_type}\n"
+        f"- {'ให้มีเฉลยอธิบายสั้นๆ' if include_explanations else 'ไม่ต้องใส่คำอธิบายเฉลยยาว'}\n"
+        f"- เน้นหัวข้อ: {focus_topic or 'ครอบคลุมจากเนื้อหาที่ให้มา'}\n"
+        "- ถ้าเนื้อหากว้างเกินไป ให้เลือกประเด็นสำคัญที่สุดก่อน\n"
+        "- คำถามทุกข้อต้องอิงจากเนื้อหาที่ให้มาเท่านั้น"
+    )
     
-    response = quiz_chain.invoke({
+    payload = {
         "context": truncated_text,
+        "requirements": requirements,
         "format_instructions": parser.get_format_instructions()
-    })
+    }
+
+    try:
+        response = quiz_chain.invoke(payload)
+    except OutputParserException as exc:
+        raise ValueError(
+            "โมเดลสร้างข้อสอบสำเร็จไม่ครบรูปแบบ JSON ที่ระบบต้องการ กรุณาลองใหม่หรือใช้ไฟล์ที่สั้นลง"
+        ) from exc
+    except Exception as exc:
+        raise ValueError(f"การสร้างข้อสอบล้มเหลว: {exc}") from exc
+
+    if not isinstance(response, dict):
+        raise ValueError("ระบบสร้างข้อสอบได้ผลลัพธ์ผิดรูปแบบ")
+
+    questions = response.get("questions")
+    if not isinstance(questions, list) or not questions:
+        raise ValueError("ระบบไม่สามารถสร้างรายการคำถามจากไฟล์นี้ได้")
+
+    for question in questions:
+        if not isinstance(question, dict):
+            raise ValueError("ข้อมูลคำถามที่สร้างได้ผิดรูปแบบ")
+        options = question.get("options")
+        if not isinstance(options, list) or len(options) < 2:
+            raise ValueError("ตัวเลือกคำตอบของข้อสอบไม่ครบ")
+
     return response
 
 def save_quiz_to_db(conn, user_id, quiz_data):
