@@ -18,7 +18,7 @@ llm = ChatOpenAI(
     api_key=os.getenv("TYPHOON_KEY"),
     model='typhoon-v2.5-30b-a3b-instruct',
     temperature=0.3,
-    max_tokens=5000
+    max_tokens=8000
 )
 
 class QuestionSchema(BaseModel):
